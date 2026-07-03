@@ -10,9 +10,6 @@ The bootstrap downloads arch-setup.sh to a temp file and runs it with the
 terminal attached. The setup clones this repo to ~/Workspace/linux/arch and
 stows `dotfiles/` into $HOME.
 
-Ported from keirfantasy/fedora — same phases, pacman instead of dnf,
-no RPM Fusion/snapd (unrar and multimedia come from the regular repos).
-
 Maintenance re-run:
   ./arch-setup.sh --sync
 
