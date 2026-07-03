@@ -33,6 +33,26 @@ stop_sudo_keepalive() {
   [[ -n "$SUDO_KEEPALIVE_PID" ]] && kill "$SUDO_KEEPALIVE_PID" 2>/dev/null || true
 }
 
+# Enable colored output + the ILoveCandy progress-bar easter egg in pacman.
+# Idempotent: safe to re-run, handles #Color, Color, or neither.
+configure_pacman() {
+  local conf=/etc/pacman.conf
+  if ! grep -q '^Color' "$conf"; then
+    sudo sed -i 's/^#Color$/Color/' "$conf"
+    # fallback if no commented Color line exists
+    grep -q '^Color' "$conf" || sudo sed -i '/^\[options\]/a Color' "$conf"
+  fi
+  grep -q '^ILoveCandy' "$conf" || sudo sed -i '/^Color$/a ILoveCandy' "$conf"
+  # NoProgressBar suppresses the progress bar entirely, which hides ILoveCandy.
+  sudo sed -i 's/^NoProgressBar$/#NoProgressBar/' "$conf"
+  # Verify instead of assuming the seds matched.
+  if grep -q '^Color' "$conf" && grep -q '^ILoveCandy' "$conf" && ! grep -q '^NoProgressBar' "$conf"; then
+    log_info "  pacman.conf: Color + ILoveCandy enabled"
+  else
+    log_warn "  pacman.conf: could not fully enable Color/ILoveCandy — check $conf manually"
+  fi
+}
+
 # Create the local git identity file (~/.gitconfig.local) if it's missing.
 setup_gitconfig_local() {
   local target="$HOME/.gitconfig.local"
@@ -129,6 +149,8 @@ phase0() {
     log_error "pacman is not available — this script targets Arch only"
     exit 1
   fi
+
+  configure_pacman
 
   if ! command -v stow &>/dev/null; then
     log_info "stow: installing..."
@@ -589,6 +611,9 @@ sync_main() {
     exit 1
   fi
   log_info "  OK"
+
+  log_info "--- Sync: pacman ---"
+  configure_pacman
 
   log_info "--- Sync: stow ---"
   local backup_dir="$HOME/.config-backup/sync-$(date +%s)"
