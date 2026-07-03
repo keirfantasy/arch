@@ -15,3 +15,16 @@ no RPM Fusion/snapd (unrar and multimedia come from the regular repos).
 
 Maintenance re-run:
   ./arch-setup.sh --sync
+
+Fresh Arch WSL prep (run as root before the one-liner):
+
+  pacman -Syu --needed sudo git
+  echo '%wheel ALL=(ALL:ALL) ALL' > /etc/sudoers.d/wheel
+  chmod 0440 /etc/sudoers.d/wheel
+  useradd -m -g users -G wheel <user>
+  passwd <user>
+  sed -i 's/^#en_US.UTF-8/en_US.UTF-8/' /etc/locale.gen && locale-gen
+  echo 'LANG=en_US.UTF-8' > /etc/locale.conf
+  printf '[user]\ndefault=<user>\n' > /etc/wsl.conf
+
+Then `wsl --terminate archlinux`, relaunch, and run the one-liner as <user>.
