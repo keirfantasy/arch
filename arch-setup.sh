@@ -477,7 +477,9 @@ install_fzf() {
   else
     git clone --depth 1 https://github.com/junegunn/fzf.git ~/.fzf
   fi
-  ~/.fzf/install --all
+  # --bin only: keybindings/completion come from `fzf --zsh` in .zsh_apps,
+  # and --all would append duplicate lines to the stowed .zshrc.
+  ~/.fzf/install --bin
   [[ -x ~/.fzf/bin/fzf ]] && ln -sf ~/.fzf/bin/fzf ~/.local/bin/fzf
   command -v fzf || { log_error "fzf install failed"; exit 1; }
 }
@@ -491,9 +493,10 @@ install_zoxide() {
 
 install_atuin() {
   command -v atuin && return 0
-  log_info "atuin: installing..."
-  curl -fsSL https://setup.atuin.sh | bash
-  [[ -x ~/.atuin/bin/atuin ]] && ln -sf ~/.atuin/bin/atuin ~/.local/bin/atuin
+  log_info "atuin: installing via pacman..."
+  # The upstream curl installer appends `eval "$(atuin init zsh)"` to the
+  # stowed .zshrc (duplicate of .zsh_apps); the Arch package doesn't.
+  sudo pacman -S --needed --noconfirm atuin
   command -v atuin || { log_error "atuin install failed"; exit 1; }
 }
 
@@ -549,7 +552,8 @@ update_fzf() {
   fi
   log_info "fzf: updating..."
   cd ~/.fzf && git pull --ff-only
-  ~/.fzf/install --all
+  # --bin only: see install_fzf.
+  ~/.fzf/install --bin
   [[ -x ~/.fzf/bin/fzf ]] && ln -sf ~/.fzf/bin/fzf ~/.local/bin/fzf
   command -v fzf || { log_error "fzf update failed"; return 1; }
 }
