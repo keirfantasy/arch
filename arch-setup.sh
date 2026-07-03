@@ -1,0 +1,651 @@
+#!/usr/bin/env bash
+#
+# Arch setup: packages, zsh, dotfiles, CLI tools, neovim.
+#
+# Install:  curl -fsSL https://raw.githubusercontent.com/keirfantasy/arch/main/bootstrap.sh | bash
+# Options:  --desktop | --headless | --sync   (desktop auto-detected)
+#
+set -euo pipefail
+set +H
+export LC_ALL=C
+
+REPO_DIR="$HOME/Workspace/linux/arch"
+DOTFILES_DIR="$REPO_DIR/dotfiles"
+
+# ---- PATH ----
+export PATH="$HOME/.local/bin:$HOME/.cargo/bin:$HOME/go/bin:$HOME/.opencode/bin:$HOME/.atuin/bin:$HOME/.fzf/bin:$PATH"
+[[ -f "$HOME/.cargo/env" ]] && source "$HOME/.cargo/env"
+
+# ---- Helpers ----
+log_info()  { printf '\033[1;34m%s\033[0m\n' "$*"; }
+log_warn()  { printf '\033[1;33m%s\033[0m\n' "$*"; }
+log_error() { printf '\033[1;31m%s\033[0m\n' "$*"; }
+
+# ---- Sudo keep-alive ----
+# Refresh the sudo timestamp in the background so long runs don't stall on a prompt.
+SUDO_KEEPALIVE_PID=""
+start_sudo_keepalive() {
+  ( while true; do sudo -n true 2>/dev/null; sleep 50; kill -0 "$$" 2>/dev/null || exit 0; done ) &
+  SUDO_KEEPALIVE_PID=$!
+  trap 'stop_sudo_keepalive' EXIT
+}
+stop_sudo_keepalive() {
+  [[ -n "$SUDO_KEEPALIVE_PID" ]] && kill "$SUDO_KEEPALIVE_PID" 2>/dev/null || true
+}
+
+# Create the local git identity file (~/.gitconfig.local) if it's missing.
+setup_gitconfig_local() {
+  local target="$HOME/.gitconfig.local"
+
+  if [[ -e "$target" ]]; then
+    log_info "  git identity: ~/.gitconfig.local exists — leaving as-is"
+    return 0
+  fi
+
+  local name="" email=""
+  log_info "Configuring git identity (~/.gitconfig.local)..."
+  # Prompt if a terminal is available, otherwise write a template.
+  if [[ -e /dev/tty ]]; then
+    read -rp "  Git user name  (blank = fill in later): " name < /dev/tty || true
+    read -rp "  Git email      (blank = fill in later): " email < /dev/tty || true
+  fi
+
+  if [[ -n "$name" && -n "$email" ]]; then
+    cat > "$target" <<EOF
+[user]
+	name = $name
+	email = $email
+EOF
+    log_info "  git identity written to $target"
+  else
+    cat > "$target" <<'EOF'
+# Local git identity — NOT tracked by the dotfiles repo.
+# Fill in and uncomment:
+#[user]
+#	name = Your Name
+#	email = you@example.com
+EOF
+    log_warn "  git identity left as a template — edit $target before committing"
+  fi
+}
+
+STOW_TARGETS=(
+  ".config/alacritty"
+  ".config/atuin"
+  ".config/btop"
+  ".config/fastfetch"
+  ".config/herdr"
+  ".config/lazygit"
+  ".config/nvim"
+  ".config/starship.toml"
+  ".gitconfig"
+  ".zshrc"
+  ".zsh_aliases"
+  ".zsh_apps"
+  ".zsh_functions"
+  ".zsh_keybinds"
+  ".zsh_plugins"
+)
+
+# ---- Parse CLI flags ----
+MODE_SYNC=0
+IS_DESKTOP=-1
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --desktop) IS_DESKTOP=1; shift ;;
+    --headless) IS_DESKTOP=0; shift ;;
+    --sync) MODE_SYNC=1; shift ;;
+    --help) echo "Usage: $0 [--desktop|--headless|--sync]"; exit 0 ;;
+    *) log_error "Unknown flag: $1"; exit 1 ;;
+  esac
+done
+
+if (( IS_DESKTOP == -1 )); then
+  if [[ -n "${WSL_DISTRO_NAME:-}" || -f /proc/sys/fs/binfmt_misc/WSLInterop ]]; then
+    IS_DESKTOP=0
+    log_info "WSL detected — desktop extras (fonts) will be skipped."
+  elif [[ -n "${DISPLAY:-}" || -n "${WAYLAND_DISPLAY:-}" ]]; then
+    IS_DESKTOP=1
+  else
+    IS_DESKTOP=0
+    log_warn "No display detected — desktop extras (fonts) will be skipped."
+    log_warn "Override with --desktop if this is a GUI system running headless."
+  fi
+fi
+# ----------------------------------------------------------------------
+# PHASE 0 — Prerequisites
+# ----------------------------------------------------------------------
+phase0() {
+  log_info "--- Phase 0: Prerequisites ---"
+
+  if ! command -v sudo &>/dev/null; then
+    log_error "sudo is required"
+    exit 1
+  fi
+  sudo -v  # refresh sudo timestamp
+  start_sudo_keepalive  # keep sudo alive for the whole unattended run
+
+  if ! command -v pacman &>/dev/null; then
+    log_error "pacman is not available — this script targets Arch only"
+    exit 1
+  fi
+
+  if ! command -v stow &>/dev/null; then
+    log_info "stow: installing..."
+    sudo pacman -S --needed --noconfirm stow
+  fi
+
+  log_info "Phase 0 complete"
+}
+
+# ----------------------------------------------------------------------
+# PHASE 1 — System packages
+# ----------------------------------------------------------------------
+phase1() {
+  log_info "--- Phase 1: System packages ---"
+
+  local -a packages=()
+  local -a desktop_packages=()
+
+  # Core packages (Rust comes from rustup in phase 4, not distro packages)
+  for pkg in zsh stow neovim git unzip fontconfig gcc make cmake curl wget perl \
+             python python-pip nodejs npm go ruby php graphviz \
+             ripgrep fd luarocks imagemagick ghostscript htop btop \
+             trash-cli tree net-tools bzip2 strace 7zip flatpak github-cli; do
+    if ! pacman -Qq "$pkg" &>/dev/null; then
+      packages+=("$pkg")
+    fi
+  done
+
+  if (( IS_DESKTOP )); then
+    for pkg in alacritty wl-clipboard xclip; do
+      if ! pacman -Qq "$pkg" &>/dev/null; then
+        desktop_packages+=("$pkg")
+      fi
+    done
+  fi
+
+  if (( ${#packages[@]} > 0 )); then
+    log_info "Installing packages: ${packages[*]}"
+    sudo pacman -S --needed --noconfirm "${packages[@]}"
+  fi
+
+  if (( ${#desktop_packages[@]} > 0 )); then
+    log_info "Installing desktop packages: ${desktop_packages[*]}"
+    sudo pacman -S --needed --noconfirm "${desktop_packages[@]}"
+  fi
+
+  log_info "Phase 1 complete"
+}
+
+# ----------------------------------------------------------------------
+# PHASE 2 — Zsh
+# ----------------------------------------------------------------------
+phase2() {
+  log_info "--- Phase 2: Zsh ---"
+
+  if ! pacman -Qq zsh &>/dev/null; then
+    sudo pacman -S --needed --noconfirm zsh
+  fi
+
+  # Canonicalize (e.g. /usr/sbin/zsh -> /usr/bin/zsh on merged-usr systems)
+  # so the passwd entry matches what /etc/shells lists.
+  local zsh_path
+  zsh_path="$(readlink -f "$(command -v zsh)")"
+  if ! grep -qx "$zsh_path" /etc/shells; then
+    log_warn "$zsh_path is not listed in /etc/shells — some tools may fall back to bash"
+  fi
+
+  local current_shell
+  current_shell="$(getent passwd "$USER" | cut -d: -f7)"
+  if [[ "$current_shell" != "$zsh_path" ]]; then
+    sudo usermod -s "$zsh_path" "$USER"
+    log_info "Default shell set to $zsh_path"
+    log_info "Log out and back in, or run: exec zsh"
+  else
+    log_info "zsh is already the default shell"
+  fi
+
+  # Make the rest of this run (and anything it spawns, e.g. a herdr server)
+  # inherit zsh instead of the stale login shell.
+  export SHELL="$zsh_path"
+
+  log_info "Phase 2 complete"
+}
+
+# ----------------------------------------------------------------------
+# PHASE 3 — Dotfiles via stow
+# ----------------------------------------------------------------------
+phase3() {
+  log_info "--- Phase 3: Dotfiles ---"
+
+  # Clone or update the setup repo (dotfiles live in its dotfiles/ subdir)
+  if [[ -d "$REPO_DIR/.git" ]]; then
+    cd "$REPO_DIR"
+    if ! git pull --ff-only; then
+      log_error "setup repo has diverged — resolve manually in $REPO_DIR"
+      exit 1
+    fi
+  else
+    log_info "Cloning setup repo..."
+    mkdir -p "$(dirname "$REPO_DIR")"
+    git clone https://github.com/keirfantasy/arch.git "$REPO_DIR"
+  fi
+
+  if [[ ! -f "$DOTFILES_DIR/.stow-local-ignore" ]]; then
+    log_warn ".stow-local-ignore missing — zinit/ and usr/ may get symlinked"
+  fi
+
+  cd "$DOTFILES_DIR"
+
+  # Back up any real files that would collide, so restow never aborts
+  local backup_dir="$HOME/.config-backup/setup-$(date +%Y%m%d-%H%M%S)"
+  local backed_up=0 conflict link
+  while IFS= read -r conflict; do
+    [ -n "$conflict" ] || continue
+    if [ -e "$HOME/$conflict" ] && [ ! -L "$HOME/$conflict" ]; then
+      mkdir -p "$backup_dir/$(dirname "$conflict")"
+      mv "$HOME/$conflict" "$backup_dir/$conflict"
+      log_info "  Backed up $conflict"
+      backed_up=1
+    fi
+  done < <(stow -n --restow --no-folding . --target="$HOME" 2>&1 \
+             | sed -n 's/.*existing target is neither a link nor a directory: //p; s/.*over existing target \(.*\) since.*/\1/p')
+
+  # Deploy (restow is idempotent, so re-runs just update)
+  stow --restow --no-folding . --target="$HOME"
+  (( backed_up )) && log_info "Backups saved to $backup_dir"
+
+  # Remove dangling symlinks left by files dropped in newer versions
+  # (also matches the pre-merge ~/Workspace/linux/dotfiles location)
+  while IFS= read -r link; do
+    case "$(readlink "$link" 2>/dev/null)" in
+      *Workspace/linux/arch/dotfiles*) rm -f "$link"; log_info "  Removed stale link ${link#"$HOME"/}" ;;
+    esac
+  done < <(find "$HOME" -maxdepth 1 -xtype l 2>/dev/null; find "$HOME/.config" -maxdepth 5 -xtype l 2>/dev/null)
+
+  # Create ~/.gitconfig.local git identity if missing
+  setup_gitconfig_local
+
+  log_info "Phase 3 complete"
+}
+
+# ----------------------------------------------------------------------
+# PHASE 4 — CLI tools
+# ----------------------------------------------------------------------
+phase4() {
+  log_info "--- Phase 4: CLI tools ---"
+
+  local -a tools=(rustup fzf zoxide atuin starship lazygit uv opencode herdr)
+  for tool in "${tools[@]}"; do
+    if install_"$tool"; then
+      log_info "  $tool: OK"
+    else
+      log_error "  $tool: FAILED"
+    fi
+  done
+
+  # Tree-sitter via npm
+  if install_tree_sitter_cli; then
+    log_info "  tree-sitter-cli: OK"
+  else
+    log_warn "  tree-sitter-cli: FAILED"
+  fi
+
+  # pip
+  if install_pip_tools; then
+    log_info "  pynvim: OK"
+  else
+    log_warn "  pynvim: FAILED"
+  fi
+
+  # npm
+  if install_npm_tools; then
+    log_info "  npm tools: OK"
+  else
+    log_warn "  npm tools: FAILED"
+  fi
+
+  # gem
+  if install_gem_tools; then
+    log_info "  neovim gem: OK"
+  else
+    log_warn "  neovim gem: FAILED"
+  fi
+
+  # composer
+  if install_composer; then
+    log_info "  composer: OK"
+  else
+    log_warn "  composer: FAILED"
+  fi
+
+  # fastfetch
+  if install_fastfetch; then
+    log_info "  fastfetch: OK"
+  else
+    log_warn "  fastfetch: FAILED"
+  fi
+
+  # ---- Docker ----
+  if ! command -v docker &>/dev/null; then
+    log_info "docker: installing..."
+    sudo pacman -S --needed --noconfirm docker docker-compose
+    if systemctl is-system-running &>/dev/null; then
+      sudo systemctl enable --now docker
+    fi
+    sudo usermod -aG docker "$USER"
+    log_info "docker installed — log out and back in for group membership to take effect"
+  fi
+
+  log_info "Phase 4 complete"
+}
+
+# ----------------------------------------------------------------------
+# PHASE 5 — Desktop extras
+# ----------------------------------------------------------------------
+phase5() {
+  if (( ! IS_DESKTOP )); then
+    log_info "--- Phase 5: Desktop extras (skipped — headless mode) ---"
+    return
+  fi
+
+  log_info "--- Phase 5: Desktop extras ---"
+
+  # ---- Hack Nerd Font ----
+  local font_dir="$HOME/.local/share/fonts"
+  if ls "$font_dir"/Hack*NF* &>/dev/null 2>&1; then
+    log_info "Hack Nerd Font already installed"
+  else
+    log_info "Hack Nerd Font: installing..."
+    local tmp_dir
+    tmp_dir=$(mktemp -d)
+    if curl -L --fail -o "$tmp_dir/Hack.zip" "https://github.com/ryanoasis/nerd-fonts/releases/download/v3.4.0/Hack.zip"; then
+      mkdir -p "$font_dir"
+      unzip -o "$tmp_dir/Hack.zip" -d "$font_dir" >/dev/null 2>&1
+      fc-cache -f "$font_dir" 2>/dev/null
+      log_info "Hack Nerd Font installed"
+    else
+      log_warn "Failed to download Hack Nerd Font"
+    fi
+    rm -rf "$tmp_dir"
+  fi
+
+  # ---- unrar ----
+  if ! pacman -Qq unrar &>/dev/null; then
+    sudo pacman -S --needed --noconfirm unrar || log_warn "unrar install failed"
+  fi
+
+  log_info "Phase 5 complete"
+}
+
+# ----------------------------------------------------------------------
+# PHASE 6 — Neovim
+# ----------------------------------------------------------------------
+# nvim_headless_sync <restore|sync>
+#   restore = install exactly the pinned commits from lazy-lock.json (fresh provision)
+#   sync    = update plugins to latest and refresh the lockfile (maintenance)
+# Lazy + Treesitter run in a single nvim invocation so treesitter parsers are
+# only built after the plugins they depend on are installed (no cross-process race).
+nvim_headless_sync() {
+  local mode="${1:-restore}"
+  local lazy_cmd
+  case "$mode" in
+    sync) lazy_cmd='+Lazy! sync' ;;
+    *)    lazy_cmd='+Lazy! restore' ;;
+  esac
+
+  echo "--- $(date) ($mode) ---" >> /tmp/nvim-setup.log
+
+  log_info "Neovim: running headless $mode + treesitter update..."
+  for attempt in 1 2; do
+    if nvim --headless "$lazy_cmd" \
+         '+TSUpdateSync bash regex lua json yaml toml python javascript typescript' \
+         +qa 2>>/tmp/nvim-setup.log; then
+      log_info "  Neovim provisioned (attempt $attempt)"
+      break
+    else
+      log_warn "  Neovim provisioning failed (attempt $attempt)"
+      if (( attempt == 2 )); then
+        log_error "  Neovim provisioning failed after 2 attempts"
+        log_error "  Log: /tmp/nvim-setup.log"
+      fi
+      sleep 5
+    fi
+  done
+}
+
+phase6() {
+  log_info "--- Phase 6: Neovim ---"
+
+  local init_lua="$HOME/.config/nvim/init.lua"
+
+  if [ -L "$init_lua" ]; then
+    log_info "Neovim config deployed via dotfiles stow"
+  elif [ -e "$init_lua" ]; then
+    log_warn "~/.config/nvim/init.lua exists but is not the stowed dotfiles config — leaving as-is"
+  else
+    log_error "Neovim config not found at $init_lua — did phase 3 (stow) run? Skipping nvim provisioning."
+    return
+  fi
+
+  # Install plugins at their pinned versions (lazy-lock.json) and compile parsers.
+  nvim_headless_sync restore
+
+  log_info "Phase 6 complete"
+}
+
+# ----------------------------------------------------------------------
+# Install functions
+# ----------------------------------------------------------------------
+
+install_rustup() {
+  command -v rustc && return 0
+  log_info "rustup: installing..."
+  curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+  [[ -f "$HOME/.cargo/env" ]] && source "$HOME/.cargo/env"
+  command -v rustc || { log_error "rustup install failed"; exit 1; }
+}
+
+install_fzf() {
+  command -v fzf && return 0
+  log_info "fzf: installing..."
+  if [[ -d ~/.fzf ]]; then
+    cd ~/.fzf && git pull
+  else
+    git clone --depth 1 https://github.com/junegunn/fzf.git ~/.fzf
+  fi
+  ~/.fzf/install --all
+  [[ -x ~/.fzf/bin/fzf ]] && ln -sf ~/.fzf/bin/fzf ~/.local/bin/fzf
+  command -v fzf || { log_error "fzf install failed"; exit 1; }
+}
+
+install_zoxide() {
+  command -v zoxide && return 0
+  log_info "zoxide: installing..."
+  curl -sSfL https://webi.sh/zoxide | sh
+  command -v zoxide || { log_error "zoxide install failed"; exit 1; }
+}
+
+install_atuin() {
+  command -v atuin && return 0
+  log_info "atuin: installing..."
+  curl -fsSL https://setup.atuin.sh | bash
+  [[ -x ~/.atuin/bin/atuin ]] && ln -sf ~/.atuin/bin/atuin ~/.local/bin/atuin
+  command -v atuin || { log_error "atuin install failed"; exit 1; }
+}
+
+install_starship() {
+  command -v starship && return 0
+  log_info "starship: installing..."
+  curl -fsSL https://starship.rs/install.sh | sh -s -- -y
+  command -v starship || { log_error "starship install failed"; exit 1; }
+  if command -v starship &>/dev/null && [ ! -L "$HOME/.config/starship.toml" ] && [ ! -f "$HOME/.config/starship.toml" ]; then
+    mkdir -p "$HOME/.config"
+    starship preset pure-preset -o "$HOME/.config/starship.toml" 2>/dev/null || true
+  fi
+}
+
+install_lazygit() {
+  command -v lazygit && return 0
+  log_info "lazygit: installing..."
+  GOBIN="$HOME/.local/bin" go install github.com/jesseduffield/lazygit@latest
+  command -v lazygit || { log_error "lazygit install failed"; exit 1; }
+}
+
+install_uv() {
+  command -v uv && return 0
+  log_info "uv: installing..."
+  curl -fsSL https://astral.sh/uv/install.sh | sh
+  command -v uv || { log_error "uv install failed"; exit 1; }
+}
+
+install_opencode() {
+  command -v opencode && return 0
+  log_info "opencode: installing..."
+  curl -fsSL https://opencode.ai/install | bash
+  command -v opencode || { log_error "opencode install failed"; exit 1; }
+}
+
+install_herdr() {
+  command -v herdr && return 0
+  log_info "herdr: installing..."
+  curl -fsSL https://herdr.dev/install.sh | sh
+  command -v herdr || { log_error "herdr install failed"; exit 1; }
+}
+
+update_opencode() {
+  log_info "opencode: updating..."
+  curl -fsSL https://opencode.ai/install | bash
+  command -v opencode || log_warn "opencode update failed"
+}
+
+update_fzf() {
+  if [[ ! -d ~/.fzf ]]; then
+    install_fzf
+    return
+  fi
+  log_info "fzf: updating..."
+  cd ~/.fzf && git pull --ff-only
+  ~/.fzf/install --all
+  [[ -x ~/.fzf/bin/fzf ]] && ln -sf ~/.fzf/bin/fzf ~/.local/bin/fzf
+  command -v fzf || { log_error "fzf update failed"; return 1; }
+}
+
+install_tree_sitter_cli() {
+  command -v tree-sitter && return 0
+  log_info "tree-sitter-cli: installing via npm..."
+  npm install --prefix "$HOME/.local" tree-sitter-cli
+  command -v tree-sitter || { log_error "tree-sitter-cli install failed"; exit 1; }
+}
+
+install_pip_tools() {
+  python3 -c "import pynvim" 2>/dev/null && return 0
+  log_info "pip tools: installing..."
+  pip install --user --upgrade pynvim
+  python3 -c "import pynvim" || { log_error "pynvim install failed"; exit 1; }
+}
+
+install_npm_tools() {
+  local npm_prefix="$HOME/.local"
+  if [[ -d "$npm_prefix/lib/node_modules/neovim" ]]; then
+    return 0
+  fi
+  log_info "npm tools: installing..."
+  npm install --prefix "$npm_prefix" neovim @mermaid-js/mermaid-cli
+}
+
+install_gem_tools() {
+  gem list -i neovim 2>/dev/null && return 0
+  log_info "gem tools: installing..."
+  gem install --user-install --no-document neovim
+  gem list -i neovim || { log_error "neovim gem install failed"; exit 1; }
+}
+
+install_composer() {
+  command -v composer && return 0
+  log_info "composer: installing via pacman..."
+  sudo pacman -S --needed --noconfirm composer
+  command -v composer || { log_error "composer install failed"; exit 1; }
+}
+
+install_fastfetch() {
+  command -v fastfetch && return 0
+  log_info "fastfetch: installing via pacman..."
+  sudo pacman -S --needed --noconfirm fastfetch 2>/dev/null || log_warn "fastfetch install failed"
+}
+
+# ----------------------------------------------------------------------
+# Sync (maintenance mode)
+# ----------------------------------------------------------------------
+sync_main() {
+  log_info "--- Sync: repo ---"
+  cd "$REPO_DIR"
+  if ! git pull --ff-only; then
+    log_error "setup repo has diverged — resolve manually in $REPO_DIR"
+    exit 1
+  fi
+  log_info "  OK"
+
+  log_info "--- Sync: stow ---"
+  local backup_dir="$HOME/.config-backup/sync-$(date +%s)"
+  for t in "${STOW_TARGETS[@]}"; do
+    if [ -e "$HOME/$t" ] && [ ! -L "$HOME/$t" ]; then
+      mkdir -p "$backup_dir/$(dirname "$t")"
+      mv "$HOME/$t" "$backup_dir/$t"
+      log_info "  Backed up $t"
+    fi
+  done
+  cd "$DOTFILES_DIR" && stow --restow --no-folding . --target="$HOME"
+  log_info "  OK"
+
+  log_info "--- Sync: tools ---"
+  for tool in rustup zoxide atuin starship lazygit uv herdr; do
+    if install_"$tool"; then log_info "  $tool: OK"; else log_warn "  $tool: FAILED"; fi
+  done
+  if update_fzf; then log_info "  fzf: OK"; else log_warn "  fzf: FAILED"; fi
+  if update_opencode; then log_info "  opencode: OK"; else log_warn "  opencode: FAILED"; fi
+
+  if [[ -d "$HOME/.local/lib/node_modules/neovim" ]]; then
+    npm update --prefix "$HOME/.local" 2>/dev/null && log_info "  npm tools: OK" || log_warn "  npm tools: FAILED"
+    npm update -g 2>/dev/null && log_info "  npm global: OK" || log_warn "  npm global: FAILED"
+  fi
+  pip install --user --upgrade pip pynvim 2>/dev/null && log_info "  pip: OK" || log_warn "  pip: FAILED"
+
+  log_info "--- Sync: neovim ---"
+  nvim_headless_sync sync
+
+  log_info "--- Sync complete ---"
+}
+
+# ----------------------------------------------------------------------
+# Main
+# ----------------------------------------------------------------------
+main() {
+  if (( MODE_SYNC )); then
+    sync_main
+    return
+  fi
+
+  phase0
+  phase1
+  phase2
+  phase3
+  phase4
+  phase5
+  phase6
+
+  echo
+  log_info "--- Setup complete ---"
+  log_info "Log out and back in (or exec zsh) to switch to zsh."
+  if command -v herdr &>/dev/null && [[ -S "$HOME/.config/herdr/herdr.sock" ]]; then
+    log_warn "A herdr server is running and caches the old \$SHELL —"
+    log_warn "run 'herdr server stop' so new panes pick up zsh."
+  fi
+}
+
+# Run main when executed (normally or piped); skip only when sourced.
+if [[ "${BASH_SOURCE[0]}" == "${0}" ]] || [[ -z "${BASH_SOURCE[0]:-}" ]]; then
+  main "$@"
+fi
+true

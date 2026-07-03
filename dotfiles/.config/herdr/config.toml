@@ -1,0 +1,22 @@
+onboarding = false
+[ui]
+agent_panel_sort = "spaces"
+
+[theme]
+name = "tokyo-night"
+auto_switch = false
+
+[ui.sound]
+enabled = false
+
+[ui.toast]
+delivery = "system"
+
+[experimental]
+pane_history = false
+
+[session]
+resume_agents_on_restore = true
+
+[terminal]
+default_shell = "/usr/bin/zsh"
