@@ -534,15 +534,18 @@ update_fzf() {
 
 install_tree_sitter_cli() {
   command -v tree-sitter && return 0
-  log_info "tree-sitter-cli: installing via npm..."
-  npm install --prefix "$HOME/.local" tree-sitter-cli
+  log_info "tree-sitter-cli: installing via pacman..."
+  # npm's install-script gating (11.16+) blocks tree-sitter-cli's postinstall;
+  # Arch ships it as a regular package anyway.
+  sudo pacman -S --needed --noconfirm tree-sitter-cli
   command -v tree-sitter || { log_error "tree-sitter-cli install failed"; exit 1; }
 }
 
 install_pip_tools() {
   python3 -c "import pynvim" 2>/dev/null && return 0
-  log_info "pip tools: installing..."
-  pip install --user --upgrade pynvim
+  log_info "pynvim: installing via pacman..."
+  # Arch's Python is PEP 668 externally-managed; pip install --user is refused.
+  sudo pacman -S --needed --noconfirm python-pynvim
   python3 -c "import pynvim" || { log_error "pynvim install failed"; exit 1; }
 }
 
@@ -610,7 +613,7 @@ sync_main() {
     npm update --prefix "$HOME/.local" 2>/dev/null && log_info "  npm tools: OK" || log_warn "  npm tools: FAILED"
     npm update -g 2>/dev/null && log_info "  npm global: OK" || log_warn "  npm global: FAILED"
   fi
-  pip install --user --upgrade pip pynvim 2>/dev/null && log_info "  pip: OK" || log_warn "  pip: FAILED"
+  sudo pacman -S --needed --noconfirm python-pynvim 2>/dev/null && log_info "  pynvim: OK" || log_warn "  pynvim: FAILED"
 
   log_info "--- Sync: neovim ---"
   nvim_headless_sync sync
